@@ -49,7 +49,7 @@ h1{font-family:var(--display);font-weight:400;font-size:clamp(28px,4.2vw,42px);l
 .stage{position:relative;background:var(--stage);border-radius:20px;overflow:hidden;aspect-ratio:3/4;max-height:78vh;width:100%;max-width:100%}
 body.store .stage{aspect-ratio:auto;height:calc(100vh - 230px)}
 .stage video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
-body.mirrored .stage video{transform:scaleX(-1)}
+body.mirrored #cam{transform:scaleX(-1)}
 .gate{position:absolute;inset:0;display:grid;place-content:center;justify-items:center;gap:22px;text-align:center;padding:24px}
 .camicon{width:72px;height:72px;border-radius:50%;border:1px solid #5B5657;color:#B9B3B4;display:grid;place-items:center}
 .gate p{margin:0;color:#8F898A;font-size:13px;max-width:28ch}
@@ -249,8 +249,10 @@ async function start() {
   try {
     sdk = sdk || (await import(SDK_URL));
     const client = sdk.createDecartClient({ apiKey: key });
-    st.rt = await client.realtime.connect(st.stream, {
-      model: sdk.models.realtime(MODEL),
+    const model = sdk.models.realtime(MODEL);
+    const send = fitStream(cam, model.width || 1280, model.height || 704, model.fps || 25, st.facing === "user");
+    st.rt = await client.realtime.connect(send, {
+      model,
       onRemoteStream: (remote) => { const o = $("out"); o.srcObject = remote; o.hidden = false; o.play().catch(() => {}); $("loading").hidden = true; },
     });
     st.startedAt = Date.now(); tick();
@@ -264,7 +266,29 @@ async function start() {
       : "เชื่อมต่อ AI ไม่สำเร็จ: " + m.slice(0, 160);
   }
 }
+/* The AI works on a fixed landscape frame. Fit the camera inside it without stretching
+   (side bars for a portrait phone), mirror the front camera here so the AI's output already
+   reads like a mirror, then show the output cropped back to the camera's own shape. */
+let fitLoop = 0;
+function fitStream(cam, W, H, fps, mirror) {
+  const c = document.createElement("canvas"); c.width = W; c.height = H;
+  const g = c.getContext("2d");
+  const draw = () => {
+    const vw = cam.videoWidth, vh = cam.videoHeight;
+    if (vw && vh) {
+      const s = Math.min(W / vw, H / vh), dw = vw * s, dh = vh * s;
+      g.setTransform(1, 0, 0, 1, 0, 0); g.fillStyle = "#808080"; g.fillRect(0, 0, W, H);
+      if (mirror) { g.translate(W, 0); g.scale(-1, 1); }
+      g.drawImage(cam, (W - dw) / 2, (H - dh) / 2, dw, dh);
+      $("stage").style.aspectRatio = vw + " / " + vh; $("stage").style.maxHeight = "none";
+    }
+    fitLoop = requestAnimationFrame(draw);
+  };
+  cancelAnimationFrame(fitLoop); draw();
+  return c.captureStream(fps);
+}
 function stop(showMsg = true) {
+  cancelAnimationFrame(fitLoop);
   try { st.rt?.disconnect?.(); } catch {}
   st.rt = null;
   st.stream?.getTracks().forEach((t) => t.stop()); st.stream = null;
