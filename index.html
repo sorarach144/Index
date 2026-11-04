@@ -251,25 +251,29 @@ async function start() {
   const key = $("apikey").value.trim();
   if (!key) { $("gateMsg").textContent = "วาง API key ของ Decart ก่อน"; return; }
   try { localStorage.setItem("decartKey", key); } catch {}
-  $("gateMsg").textContent = "กำลังเตรียมระบบ AI";
-  let model;
-  try { sdk = sdk || (await import(SDK_URL)); model = sdk.models.realtime(MODEL); }
-  catch (e) { console.error(e); $("gateMsg").textContent = "โหลดระบบ AI ไม่ได้ ตรวจสอบอินเทอร์เน็ตแล้วลองอีกครั้ง"; return; }
-  // Ask the camera for exactly the frame size and speed the AI model works at (Decart's own setup)
+  $("gateMsg").textContent = "";
+  // Open the camera first, straight from the tap (iPhone Safari is strict about this)
   try {
-    st.stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: {
-      facingMode: st.facing,
-      ...(model.width ? { width: { ideal: model.width } } : {}),
-      ...(model.height ? { height: { ideal: model.height } } : {}),
-      ...(model.fps ? { frameRate: { ideal: model.fps } } : {}),
-    } });
-  } catch {
-    $("gateMsg").textContent = location.protocol === "https:" || location.hostname === "localhost"
-      ? "เปิดกล้องไม่ได้ กดอนุญาตการใช้กล้องในเบราว์เซอร์แล้วลองอีกครั้ง"
-      : "กล้องใช้ได้เฉพาะเว็บที่เป็น https เท่านั้น อัปโหลดไฟล์นี้ขึ้นเว็บก่อน";
+    st.stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: st.facing } });
+  } catch (e) {
+    $("gateMsg").textContent = location.protocol !== "https:" && location.hostname !== "localhost"
+      ? "กล้องใช้ได้เฉพาะเว็บที่เป็น https เท่านั้น อัปโหลดไฟล์นี้ขึ้นเว็บก่อน"
+      : e && e.name === "NotAllowedError"
+        ? "Safari ไม่อนุญาตกล้อง: กด aA บนแถบที่อยู่ → การตั้งค่าเว็บไซต์ → กล้อง → อนุญาต แล้วกดเปิดกล้องอีกครั้ง"
+        : "เปิดกล้องไม่ได้ (" + ((e && e.name) || "error") + ") ปิดแอปอื่นที่ใช้กล้องอยู่ แล้วลองอีกครั้ง";
     return;
   }
-  $("gateMsg").textContent = "";
+  let model;
+  try { sdk = sdk || (await import(SDK_URL)); model = sdk.models.realtime(MODEL); }
+  catch (e) { console.error(e); st.stream.getTracks().forEach((t) => t.stop()); $("gateMsg").textContent = "โหลดระบบ AI ไม่ได้ ตรวจสอบอินเทอร์เน็ตแล้วลองอีกครั้ง"; return; }
+  // Then match the frame size and speed the AI model works at (skipped quietly if the camera can't)
+  try {
+    const c = {};
+    if (model.width) c.width = { ideal: model.width };
+    if (model.height) c.height = { ideal: model.height };
+    if (model.fps) c.frameRate = { ideal: model.fps };
+    if (Object.keys(c).length) await st.stream.getVideoTracks()[0].applyConstraints(c);
+  } catch {}
   const cam = $("cam"); cam.srcObject = st.stream; await cam.play().catch(() => {});
   fitStage(cam);
   document.body.classList.toggle("mirrored", st.facing === "user");
