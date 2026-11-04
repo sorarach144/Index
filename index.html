@@ -48,7 +48,7 @@ h1{font-family:var(--display);font-weight:400;font-size:clamp(28px,4.2vw,42px);l
 /* stage */
 .stage{position:relative;background:var(--stage);border-radius:20px;overflow:hidden;aspect-ratio:3/4;max-height:78vh;width:100%;max-width:100%}
 body.store .stage{aspect-ratio:auto;height:calc(100vh - 230px)}
-.stage video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.stage video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:var(--stage)}
 body.mirrored #cam{transform:scaleX(-1)}
 .gate{position:absolute;inset:0;display:grid;place-content:center;justify-items:center;gap:22px;text-align:center;padding:24px}
 .camicon{width:72px;height:72px;border-radius:50%;border:1px solid #5B5657;color:#B9B3B4;display:grid;place-items:center}
@@ -216,10 +216,9 @@ const esc = (t) => String(t ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const st = {
   mode: location.hash === "#store" ? "store" : "home",
   products: [{ id: "dino", name: "เสื้อยืดลายไดโนพาร์ค", price: 350, cat: "top", image: DINO, sizes: ["S", "M", "L", "XL"],
-    prompt: "Substitute the current top with a green short-sleeve crew-neck t-shirt with light green sunburst rays, a large cartoon blue brontosaurus print on the front and a red-orange Thai text logo across the chest" }],
-  current: null, size: "M", cart: [], stream: null, rt: null, facing: "user", startedAt: 0, view: "cart", blobs: new Map(),
+    prompt: "Substitute the current top with a green short-sleeve crew-neck t-shirt with light green sunburst rays, a large cartoon blue brontosaurus print on the front and a red-orange Thai text logo across the chest", desc: "a green short-sleeve crew-neck t-shirt with sunburst rays, a cartoon blue dinosaur print and a red-orange Thai text logo" }],
+  current: null, sel: { top: "dino", bottom: null }, sizes: {}, cart: [], stream: null, rt: null, facing: "user", startedAt: 0, view: "cart", blobs: new Map(),
 };
-st.current = st.products[0];
 try { $("apikey").value = localStorage.getItem("decartKey") || ""; } catch {}
 if ($("apikey").value) $("keyLink").textContent = "ใช้ key ที่บันทึกไว้ · แก้ได้ในช่องด้านบน";
 
@@ -233,31 +232,43 @@ async function start() {
   const key = $("apikey").value.trim();
   if (!key) { $("gateMsg").textContent = "วาง API key ของ Decart ก่อน"; return; }
   try { localStorage.setItem("decartKey", key); } catch {}
-  $("gateMsg").textContent = "";
+  $("gateMsg").textContent = "กำลังเตรียมระบบ AI";
+  let model;
+  try { sdk = sdk || (await import(SDK_URL)); model = sdk.models.realtime(MODEL); }
+  catch (e) { console.error(e); $("gateMsg").textContent = "โหลดระบบ AI ไม่ได้ ตรวจสอบอินเทอร์เน็ตแล้วลองอีกครั้ง"; return; }
+  // Ask the camera for exactly the frame size and speed the AI model works at (Decart's own setup)
   try {
-    st.stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: st.facing }, audio: false });
+    st.stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: {
+      facingMode: st.facing,
+      ...(model.width ? { width: { ideal: model.width } } : {}),
+      ...(model.height ? { height: { ideal: model.height } } : {}),
+      ...(model.fps ? { frameRate: { ideal: model.fps } } : {}),
+    } });
   } catch {
     $("gateMsg").textContent = location.protocol === "https:" || location.hostname === "localhost"
       ? "เปิดกล้องไม่ได้ กดอนุญาตการใช้กล้องในเบราว์เซอร์แล้วลองอีกครั้ง"
       : "กล้องใช้ได้เฉพาะเว็บที่เป็น https เท่านั้น อัปโหลดไฟล์นี้ขึ้นเว็บก่อน";
     return;
   }
+  $("gateMsg").textContent = "";
   const cam = $("cam"); cam.srcObject = st.stream; await cam.play().catch(() => {});
+  fitStage(cam);
   document.body.classList.toggle("mirrored", st.facing === "user");
   $("gate").hidden = true; $("liveUI").hidden = false; $("loading").hidden = false; $("loadTxt").textContent = "กำลังเชื่อมต่อ AI";
   status("กำลังเชื่อมต่อ"); step(2, "แตะชุดเพื่อลองบนตัวคุณ");
   try {
-    sdk = sdk || (await import(SDK_URL));
     const client = sdk.createDecartClient({ apiKey: key });
-    const model = sdk.models.realtime(MODEL);
-    const send = fitStream(cam, model.width || 1280, model.height || 704, model.fps || 25, st.facing === "user");
-    st.rt = await client.realtime.connect(send, {
-      model,
-      onRemoteStream: (remote) => { const o = $("out"); o.srcObject = remote; o.hidden = false; o.play().catch(() => {}); $("loading").hidden = true; },
+    st.rt = await client.realtime.connect(st.stream, {
+      model, mirror: "auto",
+      onRemoteStream: (remote) => {
+        const o = $("out"); o.srcObject = remote; o.hidden = false; o.play().catch(() => {});
+        o.onloadedmetadata = o.onresize = () => fitStage(o);
+        $("loading").hidden = true;
+      },
     });
     st.startedAt = Date.now(); tick();
     status("AI พร้อม", true);
-    if (st.current) await tryOn(st.current);
+    await applyOutfit();
   } catch (e) {
     console.error(e);
     stop(false);
@@ -266,27 +277,12 @@ async function start() {
       : "เชื่อมต่อ AI ไม่สำเร็จ: " + m.slice(0, 160);
   }
 }
-/* The AI works on a fixed landscape frame. Fit the camera inside it without stretching
-   (side bars for a portrait phone), mirror the front camera here so the AI's output already
-   reads like a mirror, then show the output cropped back to the camera's own shape. */
-let fitLoop = 0;
-function fitStream(cam, W, H, fps, mirror) {
-  const c = document.createElement("canvas"); c.width = W; c.height = H;
-  const g = c.getContext("2d");
-  const draw = () => {
-    const vw = cam.videoWidth, vh = cam.videoHeight;
-    if (vw && vh) {
-      const s = Math.min(W / vw, H / vh), dw = vw * s, dh = vh * s;
-      g.setTransform(1, 0, 0, 1, 0, 0); g.fillStyle = "#808080"; g.fillRect(0, 0, W, H);
-      if (mirror) { g.translate(W, 0); g.scale(-1, 1); }
-      g.drawImage(cam, (W - dw) / 2, (H - dh) / 2, dw, dh);
-      $("stage").style.aspectRatio = vw + " / " + vh; $("stage").style.maxHeight = "none";
-    }
-    fitLoop = requestAnimationFrame(draw);
-  };
-  cancelAnimationFrame(fitLoop); draw();
-  return c.captureStream(fps);
+/* Shape the mirror to the video's own proportions, so nothing is ever squeezed or cropped. */
+function fitStage(v) {
+  if (!v.videoWidth || !v.videoHeight) return;
+  const stg = $("stage"); stg.style.aspectRatio = v.videoWidth + " / " + v.videoHeight; stg.style.maxHeight = "none";
 }
+let fitLoop = 0;
 function stop(showMsg = true) {
   cancelAnimationFrame(fitLoop);
   try { st.rt?.disconnect?.(); } catch {}
@@ -306,25 +302,55 @@ async function blobFor(p) {
   if (!st.blobs.has(p.id)) st.blobs.set(p.id, await fetch(p.image).then((r) => r.blob()));
   return st.blobs.get(p.id);
 }
-async function tryOn(p) {
-  st.current = p; renderStrip(); renderSelected();
-  if (!st.rt) return;
+const SLOT = { top: "top", outer: "top", dress: "top", bottom: "bottom" };
+const slotOf = (p) => SLOT[p.cat] || "top";
+const picked = () => ["top", "bottom"].map((k) => st.sel[k] && byId(st.sel[k])).filter(Boolean);
+
+/* Two garments → one reference image (top above, bottom below) + one instruction for both. */
+async function outfitImage(top, bottom) {
+  const load = async (p) => createImageBitmap(await blobFor(p));
+  const [a, b] = await Promise.all([load(top), load(bottom)]);
+  const W = 768, H = 1024, half = H / 2, c = document.createElement("canvas"); c.width = W; c.height = H;
+  const g = c.getContext("2d"); g.fillStyle = "#FFFFFF"; g.fillRect(0, 0, W, H);
+  for (const [img, y] of [[a, 0], [b, half]]) {
+    const s = Math.min((W - 40) / img.width, (half - 30) / img.height);
+    g.drawImage(img, (W - img.width * s) / 2, y + (half - img.height * s) / 2, img.width * s, img.height * s);
+  }
+  return new Promise((r) => c.toBlob(r, "image/jpeg", 0.92));
+}
+async function applyOutfit() {
+  renderStrip(); renderSelected();
+  const items = picked();
+  if (!st.rt || !items.length) return;
   status("กำลังเปลี่ยนชุด", true);
   try {
-    await st.rt.set({ prompt: p.prompt, image: await blobFor(p), enhance: false });
-    status("กำลังใส่ " + p.name, true);
+    let image, prompt;
+    if (items.length === 2) {
+      const [top, bottom] = items;
+      image = await outfitImage(top, bottom);
+      prompt = `Substitute the current top with ${top.desc} (shown in the upper half of the reference image) and substitute the current pants with ${bottom.desc} (shown in the lower half of the reference image). Keep both garments' exact colors and patterns`;
+    } else { image = await blobFor(items[0]); prompt = items[0].prompt; }
+    await st.rt.set({ prompt, image, enhance: false });
+    status("กำลังใส่ " + items.map((p) => p.name).join(" + "), true);
   } catch (e) { console.error(e); status("เปลี่ยนชุดไม่สำเร็จ แตะอีกครั้ง", true); }
 }
+function pick(p) {
+  const k = slotOf(p);
+  st.sel[k] = st.sel[k] === p.id && picked().length > 1 ? null : p.id; // tap again to take one piece off
+  applyOutfit();
+}
+const tryOn = (p) => { st.sel[slotOf(p)] = p.id; return applyOutfit(); };
 
 /* ---------- products ---------- */
 function renderStrip() {
   const el = $("strip"); el.innerHTML = "";
   for (const p of st.products) {
+    const on = st.sel[slotOf(p)] === p.id;
     const b = document.createElement("button");
-    b.className = "pcard" + (st.current?.id === p.id ? " on" : "");
-    b.setAttribute("aria-pressed", st.current?.id === p.id);
-    b.innerHTML = `<img src="${p.image}" alt=""><span>${esc(p.name)}</span><b>${baht(p.price)}</b>`;
-    b.onclick = () => tryOn(p);
+    b.className = "pcard" + (on ? " on" : "");
+    b.setAttribute("aria-pressed", on);
+    b.innerHTML = `<img src="${p.image}" alt=""><span>${esc(p.name)}</span><b>${slotOf(p) === "bottom" ? "ท่อนล่าง" : "ท่อนบน"} · ${baht(p.price)}</b>`;
+    b.onclick = () => pick(p);
     el.appendChild(b);
   }
   const add = document.createElement("button");
@@ -336,26 +362,41 @@ let pending = null;
 $("addFile").onchange = () => { const f = $("addFile").files[0]; if (!f) return; pending = URL.createObjectURL(f); $("addPrev").src = pending; $("addform").hidden = false; $("addErr").hidden = true; };
 $("addCancel").onclick = () => { $("addform").hidden = true; $("addFile").value = ""; };
 $("addOk").onclick = () => {
-  const name = $("addName").value.trim(), price = parseInt($("addPrice").value, 10), cat = $("addCat").value, desc = $("addDesc").value.trim();
+  const name = $("addName").value.trim(), price = parseInt($("addPrice").value, 10), cat = $("addCat").value, d = $("addDesc").value.trim();
   if (!name || !(price > 0)) { $("addErr").textContent = "ใส่ชื่อและราคาให้ครบ"; $("addErr").hidden = false; return; }
   const t = TARGET[cat];
-  const prompt = `Substitute the current ${t} with ${desc || "the " + (cat === "dress" ? "dress" : t) + " shown in the reference image"}, matching its exact color, pattern and fit`;
-  const p = { id: "u" + Date.now(), name, price, cat, image: pending, sizes: ["S", "M", "L", "XL"], prompt };
+  const desc = d || `the ${cat === "dress" ? "dress" : t} shown in the reference image`;
+  const prompt = `Substitute the current ${t} with ${desc}, matching its exact color, pattern and fit`;
+  const p = { id: "u" + Date.now(), name, price, cat, image: pending, sizes: ["S", "M", "L", "XL"], prompt, desc };
   st.products.push(p); $("addform").hidden = true; $("addFile").value = "";
   ["addName", "addPrice", "addDesc"].forEach((i) => ($(i).value = ""));
   tryOn(p);
 };
 function renderSelected() {
-  const p = st.current, el = $("selected"); if (!p) { el.hidden = true; return; }
+  const items = picked(), el = $("selected");
+  if (!items.length) { el.hidden = true; return; }
   el.hidden = false;
-  el.innerHTML = `<div class="selinfo"><div class="nm">${esc(p.name)}</div><div class="price">${baht(p.price)}</div></div>
-    <div class="sizes">${p.sizes.map((z) => `<button data-z="${z}" aria-pressed="${z === st.size}">${z}</button>`).join("")}</div>
-    <div class="actions"><button class="btn ghost" id="addCart">ใส่ตะกร้า</button><button class="btn" id="next">ไปต่อ →</button></div>`;
-  el.querySelectorAll("[data-z]").forEach((b) => (b.onclick = () => { st.size = b.dataset.z; renderSelected(); }));
-  const add = () => { const f = st.cart.find((c) => c.id === p.id && c.size === st.size); if (f) f.qty++; else st.cart.push({ id: p.id, size: st.size, qty: 1 }); $("cartN").textContent = cartCount(); };
-  $("addCart").onclick = () => { add(); toast(`เพิ่ม ${p.name} ไซซ์ ${st.size} แล้ว`); };
-  $("next").onclick = () => { if (!st.cart.some((c) => c.id === p.id)) add(); openDrawer("cart"); };
+  const total = items.reduce((s, p) => s + p.price, 0);
+  el.innerHTML = items.map((p) => {
+    const z = st.sizes[p.id] || "M";
+    return `<div class="selinfo"><div class="nm">${esc(p.name)}</div><div class="price">${baht(p.price)}</div></div>
+      <div class="sizes">${p.sizes.map((s) => `<button data-id="${p.id}" data-z="${s}" aria-pressed="${s === z}">${s}</button>`).join("")}</div>`;
+  }).join("") +
+    (items.length > 1 ? `<div class="selinfo"><div class="tag">ทั้งชุด ${items.length} ชิ้น</div><div class="price big">${baht(total)}</div></div>`
+      : `<p class="note">แตะ${slotOf(items[0]) === "top" ? "กางเกง" : "เสื้อ"}อีกตัวเพื่อลองพร้อมกันทั้งชุด</p>`) +
+    `<div class="actions"><button class="btn ghost" id="addCart">${items.length > 1 ? "ใส่ทั้งชุดลงตะกร้า" : "ใส่ตะกร้า"}</button><button class="btn" id="next">ไปต่อ →</button></div>`;
+  el.querySelectorAll("[data-z]").forEach((b) => (b.onclick = () => { st.sizes[b.dataset.id] = b.dataset.z; renderSelected(); }));
+  const add = () => {
+    for (const p of items) {
+      const z = st.sizes[p.id] || "M", f = st.cart.find((c) => c.id === p.id && c.size === z);
+      if (f) f.qty++; else st.cart.push({ id: p.id, size: z, qty: 1 });
+    }
+    $("cartN").textContent = cartCount();
+  };
+  $("addCart").onclick = () => { add(); toast("เพิ่ม " + items.map((p) => p.name).join(" + ") + " แล้ว"); };
+  $("next").onclick = () => { if (!items.every((p) => st.cart.some((c) => c.id === p.id))) add(); openDrawer("cart"); };
 }
+
 /* ---------- bag + checkout ---------- */
 const byId = (id) => st.products.find((p) => p.id === id);
 const cartCount = () => st.cart.reduce((s, c) => s + c.qty, 0);
